@@ -1,6 +1,7 @@
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 9000;
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single";
 
 const SOURCES = [
   {
@@ -360,13 +361,14 @@ function recencyMultiplier(value) {
 async function translateItems(items) {
   const apiKey = process.env.OPENAI_API_KEY;
 
-  if (!apiKey) {
-    return {
-      items: [],
-      error: "缺少 OPENAI_API_KEY，已回退展示原文标题；请在 Vercel 环境变量中配置。"
-    };
+  if (apiKey) {
+    return translateItemsWithOpenAI(items, apiKey);
   }
 
+  return translateItemsWithGoogle(items.slice(0, 20));
+}
+
+async function translateItemsWithOpenAI(items, apiKey) {
   try {
     const response = await fetch(OPENAI_RESPONSES_URL, {
       method: "POST",
@@ -429,6 +431,51 @@ async function translateItems(items) {
     return { items: parseTranslations(extractOpenAIText(payload)) };
   } catch (error) {
     return { items: [], error: `OpenAI 翻译异常：${error.message || "未知错误"}` };
+  }
+}
+
+async function translateItemsWithGoogle(items) {
+  const translated = await Promise.all(items.map(async (item) => {
+    const summary = item.summary || "暂无摘要，点击查看原文。";
+
+    return {
+      id: item.id,
+      titleZh: await translateTextWithGoogle(item.title),
+      summaryZh: await translateTextWithGoogle(summary)
+    };
+  }));
+
+  return { items: translated };
+}
+
+async function translateTextWithGoogle(text) {
+  const value = truncate(cleanText(text), 900);
+
+  if (!value) {
+    return "";
+  }
+
+  try {
+    const url = `${GOOGLE_TRANSLATE_URL}?client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encodeURIComponent(value)}`;
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "AIScope/1.0 Vercel AI news reader"
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+    });
+
+    if (!response.ok) {
+      return value;
+    }
+
+    const payload = await response.json();
+    const translated = Array.isArray(payload[0])
+      ? payload[0].map((part) => part && part[0] ? part[0] : "").join("")
+      : "";
+
+    return translated || value;
+  } catch {
+    return value;
   }
 }
 
